@@ -17,9 +17,9 @@ app.use(cors({ origin: /localhost/ }));
 app.use(express.json());
 
 // Serve dashboard
-app.use(express.static(path.join(__dirname, '../dashboard')));
+app.use(express.static(path.join(__dirname, '../dashboard/dist')));
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, '../dashboard/index.html'));
+  res.sendFile(path.join(__dirname, '../dashboard/dist/index.html'));
 });
 
 // API routes
