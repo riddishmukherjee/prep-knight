@@ -1,0 +1,278 @@
+{
+  "_instructions": {
+    "note": "READ THIS AFTER IMPORTING INTO n8n",
+    "final_step": {
+      "what": "Add an HTTP Request node at the END of the workflow, after 'Parse Claude + Gate (score >= 6)'",
+      "config": {
+        "node_type": "HTTP Request",
+        "name": "Push to Prep Knight",
+        "method": "POST",
+        "url": "http://localhost:3000/api/ingest",
+        "body_type": "JSON",
+        "body": "={{ $input.all().map(i => i.json) }}",
+        "note": "If your server runs on a different host/port, update the URL accordingly. For Docker n8n talking to host machine use: http://host.docker.internal:3000/api/ingest"
+      },
+      "connect": "Connect output of 'Parse Claude + Gate (score >= 6)' → 'Push to Prep Knight'"
+    },
+    "variables_required": {
+      "LINKEDIN_RSS_URL": "Your LinkedIn saved search RSS URL",
+      "NAUKRI_RSS_URL": "Your Naukri saved search RSS URL",
+      "INDEED_RSS_URL": "https://in.indeed.com/rss?q=Senior+Product+Manager&l=Remote&sort=date",
+      "GSHEET_DOC_ID": "Google Sheet document ID from the URL",
+      "CANDIDATE_PROFILE": "5+ years PM experience, led 0-to-1 products, B2B SaaS background",
+      "PREFERRED_INDUSTRIES": "fintech, SaaS, edtech, healthtech",
+      "PREFERRED_LOCATIONS": "Bangalore, Mumbai, Remote, Hybrid",
+      "KEY_SKILLS": "product strategy, roadmap, stakeholder management, OKRs, data analytics, agile"
+    },
+    "credentials_required": [
+      "Anthropic API — your Claude API key (used by Claude Score & Filter node)",
+      "Google Sheets OAuth2 — connect your Google account (used by sheet read/write nodes)"
+    ]
+  },
+  "name": "The Prep Knight — Autonomous Quest Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "minutesInterval": 6 }]
+        }
+      },
+      "id": "trigger-schedule",
+      "name": "Run Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.LINKEDIN_RSS_URL }}",
+        "options": {}
+      },
+      "id": "linkedin-rss",
+      "name": "LinkedIn RSS Feed",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1,
+      "position": [460, 180],
+      "notes": "Set LINKEDIN_RSS_URL in n8n Variables. Get it by saving a LinkedIn job search and appending &format=rss to the URL."
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.NAUKRI_RSS_URL }}",
+        "options": {}
+      },
+      "id": "naukri-rss",
+      "name": "Naukri RSS Feed",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1,
+      "position": [460, 360],
+      "notes": "Set NAUKRI_RSS_URL in n8n Variables. From Naukri saved search > Share > RSS link."
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.INDEED_RSS_URL }}",
+        "options": {}
+      },
+      "id": "indeed-rss",
+      "name": "Indeed RSS Feed",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1,
+      "position": [460, 540],
+      "notes": "Indeed job alert RSS: https://in.indeed.com/rss?q=Senior+Product+Manager&l=Remote"
+    },
+    {
+      "parameters": {
+        "mode": "mergeByPosition",
+        "options": {}
+      },
+      "id": "merge-feeds",
+      "name": "Merge All Feeds",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [700, 360]
+    },
+    {
+      "parameters": {
+        "jsCode": "const seen = new Set();\nconst out = [];\n\nfor (const item of $input.all()) {\n  const d = item.json;\n  const url = d.link || d.url || d.guid || '';\n  if (!url || seen.has(url)) continue;\n  seen.add(url);\n\n  out.push({\n    json: {\n      title:       d.title       || d.jobTitle || 'Untitled',\n      company:     d.creator     || d.author   || d.company || 'Unknown',\n      location:    d.location    || d['dc:subject'] || 'Not specified',\n      url:         url,\n      description: d.contentSnippet || d.content || d.description || d.summary || '',\n      source:      d['rss:source'] || (url.includes('linkedin') ? 'LinkedIn' : url.includes('naukri') ? 'Naukri' : url.includes('indeed') ? 'Indeed' : 'Other'),\n      publishedAt: d.isoDate || d.pubDate || new Date().toISOString()\n    }\n  });\n}\n\nreturn out;"
+      },
+      "id": "deduplicate-normalise",
+      "name": "Deduplicate & Normalise",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 360]
+    },
+    {
+      "parameters": {
+        "resource": "spreadsheet",
+        "operation": "readRows",
+        "documentId": { "value": "={{ $vars.GSHEET_DOC_ID }}" },
+        "sheetName": { "value": "Seen URLs" },
+        "options": {}
+      },
+      "id": "check-seen-sheet",
+      "name": "Load Seen URLs",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [920, 540]
+    },
+    {
+      "parameters": {
+        "jsCode": "const seenRows = $('Load Seen URLs').all().map(r => r.json.url || '');\nconst seenSet  = new Set(seenRows);\n\nreturn $('Deduplicate & Normalise')\n  .all()\n  .filter(item => !seenSet.has(item.json.url));"
+      },
+      "id": "filter-new-only",
+      "name": "Filter New Jobs Only",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1140, 360]
+    },
+    {
+      "parameters": {
+        "model": "claude-sonnet-4-6",
+        "messages": {
+          "values": [
+            {
+              "role": "user",
+              "content": "=You are a job relevance screener.\n\nCANDIDATE PROFILE:\n{{ $vars.CANDIDATE_PROFILE }}\n\nTARGET CRITERIA:\n- Minimum level: Senior Product Manager or higher (Director, VP, Head of Product, CPO)\n- Preferred industries: {{ $vars.PREFERRED_INDUSTRIES }}\n- Preferred locations / remote: {{ $vars.PREFERRED_LOCATIONS }}\n- Skills must include at least 2 of: {{ $vars.KEY_SKILLS }}\n\nJOB LISTING:\nTitle: {{ $json.title }}\nCompany: {{ $json.company }}\nLocation: {{ $json.location }}\nSource: {{ $json.source }}\nDescription: {{ $json.description }}\n\nRespond with ONLY valid JSON. No explanation, no markdown, no code fences:\n{\n  \"pass\": true or false,\n  \"level_match\": true or false,\n  \"fit_score\": 1-10,\n  \"seniority\": \"detected seniority label\",\n  \"top_reason\": \"one sentence why this is or isn't a good fit\",\n  \"missing_keywords\": [\"keyword1\", \"keyword2\"],\n  \"flag\": \"none\" or \"overqualified\" or \"underqualified\" or \"wrong_industry\" or \"contract_only\"\n}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "claude-filter",
+      "name": "Claude — Score & Filter",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.2,
+      "position": [1360, 360]
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = [];\n\nfor (const item of $input.all()) {\n  const job = item.json;\n  let ai;\n\n  try {\n    const raw = job.message?.content?.[0]?.text || job.text || '{}';\n    const clean = raw.replace(/```json|```/g, '').trim();\n    ai = JSON.parse(clean);\n  } catch(e) {\n    ai = { pass: false, fit_score: 0, top_reason: 'Parse error', flag: 'none', missing_keywords: [] };\n  }\n\n  if (!ai.pass || ai.fit_score < 6) continue;\n\n  results.push({\n    json: {\n      title:            job.title,\n      company:          job.company,\n      location:         job.location,\n      url:              job.url,\n      source:           job.source,\n      publishedAt:      job.publishedAt,\n      fitScore:         ai.fit_score,\n      seniority:        ai.seniority,\n      topReason:        ai.top_reason,\n      missingKeywords:  (ai.missing_keywords || []).join(', '),\n      flag:             ai.flag,\n      status:           'new',\n      addedAt:          new Date().toISOString()\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "parse-and-gate",
+      "name": "Parse Claude + Gate (score >= 6)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1580, 360]
+    },
+    {
+      "parameters": {
+        "resource": "spreadsheet",
+        "operation": "appendOrUpdate",
+        "documentId": { "value": "={{ $vars.GSHEET_DOC_ID }}" },
+        "sheetName": { "value": "Jobs" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "title":           "={{ $json.title }}",
+            "company":         "={{ $json.company }}",
+            "location":        "={{ $json.location }}",
+            "url":             "={{ $json.url }}",
+            "source":          "={{ $json.source }}",
+            "publishedAt":     "={{ $json.publishedAt }}",
+            "fitScore":        "={{ $json.fitScore }}",
+            "seniority":       "={{ $json.seniority }}",
+            "topReason":       "={{ $json.topReason }}",
+            "missingKeywords": "={{ $json.missingKeywords }}",
+            "flag":            "={{ $json.flag }}",
+            "status":          "={{ $json.status }}",
+            "addedAt":         "={{ $json.addedAt }}"
+          }
+        },
+        "options": { "valueInputMode": "RAW" }
+      },
+      "id": "write-to-sheet",
+      "name": "Write to Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [1800, 220]
+    },
+    {
+      "parameters": {
+        "resource": "spreadsheet",
+        "operation": "appendOrUpdate",
+        "documentId": { "value": "={{ $vars.GSHEET_DOC_ID }}" },
+        "sheetName": { "value": "Seen URLs" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "url":    "={{ $json.url }}",
+            "seenAt": "={{ new Date().toISOString() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "mark-seen",
+      "name": "Mark URL as Seen",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [1800, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:3000/api/ingest",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "=",
+              "value": "={{ $input.all().map(i => i.json) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "push-to-dashboard",
+      "name": "Push to Prep Knight",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1800, 620],
+      "notes": "Pushes scored jobs directly to the dashboard in real-time via POST /api/ingest. For Docker: use http://host.docker.internal:3000/api/ingest"
+    }
+  ],
+  "connections": {
+    "Run Every 6 Hours": {
+      "main": [[
+        { "node": "LinkedIn RSS Feed", "type": "main", "index": 0 },
+        { "node": "Naukri RSS Feed",   "type": "main", "index": 0 },
+        { "node": "Indeed RSS Feed",   "type": "main", "index": 0 }
+      ]]
+    },
+    "LinkedIn RSS Feed": {
+      "main": [[{ "node": "Merge All Feeds", "type": "main", "index": 0 }]]
+    },
+    "Naukri RSS Feed": {
+      "main": [[{ "node": "Merge All Feeds", "type": "main", "index": 1 }]]
+    },
+    "Indeed RSS Feed": {
+      "main": [[{ "node": "Merge All Feeds", "type": "main", "index": 2 }]]
+    },
+    "Merge All Feeds": {
+      "main": [[{ "node": "Deduplicate & Normalise", "type": "main", "index": 0 }]]
+    },
+    "Deduplicate & Normalise": {
+      "main": [[
+        { "node": "Filter New Jobs Only", "type": "main", "index": 0 },
+        { "node": "Load Seen URLs",       "type": "main", "index": 0 }
+      ]]
+    },
+    "Load Seen URLs": {
+      "main": [[{ "node": "Filter New Jobs Only", "type": "main", "index": 0 }]]
+    },
+    "Filter New Jobs Only": {
+      "main": [[{ "node": "Claude — Score & Filter", "type": "main", "index": 0 }]]
+    },
+    "Claude — Score & Filter": {
+      "main": [[{ "node": "Parse Claude + Gate (score >= 6)", "type": "main", "index": 0 }]]
+    },
+    "Parse Claude + Gate (score >= 6)": {
+      "main": [[
+        { "node": "Write to Google Sheet", "type": "main", "index": 0 },
+        { "node": "Mark URL as Seen",      "type": "main", "index": 0 },
+        { "node": "Push to Prep Knight",   "type": "main", "index": 0 }
+      ]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "meta": { "templateCredsSetupCompleted": false }
+}
